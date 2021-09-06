@@ -44,7 +44,7 @@ class DeformConv2dFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    # @once_differentiabl
+    @once_differentiable
     def backward(ctx, grad_output):
         grad_output=grad_output.contiguous()
         if not grad_output.is_cuda:
