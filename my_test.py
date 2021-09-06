@@ -21,7 +21,7 @@ class DeformConv2dFunction(Function):
 '''
 print(data)
 out=deform_conv2d(data,offset,weight,bias,stride,padding,dilation,groups,deformable_groups,in_step)
-out=modulated_deform_conv2d(data,offset,mask,weight,bias,stride,padding,dilation,groups,deformable_groups,in_step)
+#out=modulated_deform_conv2d(data,offset,mask,weight,bias,stride,padding,dilation,groups,deformable_groups,in_step)
 print(out)
 
 loss=out.sum()

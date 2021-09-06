@@ -1,3 +1,6 @@
+// -*- c++ -*-
+// ^ The above line lets emacs visualize this as a c++ file
+
 #include "config.h"
 
 template <typename scalar_t>
@@ -430,6 +433,11 @@ int deform_conv2d_backward_cuda(
   return 0;
 }
 
-
-
-
+/*
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("deform_conv2d_forward_cuda", &deform_conv2d_forward_cuda,
+        "deform_conv2d_forward_cuda");
+  m.def("deform_conv2d_backward_cuda", &deform_conv2d_backward_cuda,
+        "deform_conv2d_backward_cuda");
+}
+*/
