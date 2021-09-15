@@ -4,7 +4,7 @@
 #include "config.h"
 
 template <typename scalar_t>
-__global__ void GEMM_unfold(
+__global__ void DCONV_unfold(
                 const int n, const scalar_t *data_im, const scalar_t *data_offset,
         const int height, const int width, const int kernel_h, const int kernel_w,
         const int pad_h, const int pad_w,
@@ -17,10 +17,93 @@ __global__ void GEMM_unfold(
 {
   CUDA_KERNEL_LOOP(index, n)
   {
-
+    
   }
 
 }
+
+// BOTTOM CODE IS FOR REFERENCE -- DO NOT USE:
+/* note: due to write issues, this one cannot be parallelized as well as unfolded_copy */
+void THNN_(unfolded_acc)(
+          THTensor *finput,
+          THTensor *input,
+          int kW,
+          int kH,
+          int dW,
+          int dH,
+          int padW,
+          int padH,
+          int nInputPlane,
+          int inputWidth,
+          int inputHeight,
+          int outputWidth,
+          int outputHeight)
+{
+  // This function assumes that
+  // outputHeight*dH does not overflow a long
+  // outputWidth*dW does not overflow a long
+
+  int nip;
+
+  real *input_data = THTensor_(data)(input);
+  real *finput_data = THTensor_(data)(finput);
+
+#pragma omp parallel for private(nip)
+  for(nip = 0; nip < nInputPlane; nip++)
+  {
+    int kw, kh, y, x;
+    long ix, iy;
+    for(kh = 0; kh < kH; kh++)
+    {
+      for(kw = 0; kw < kW; kw++)
+      {
+        real *src = finput_data + nip*((size_t)kH*kW*outputHeight*outputWidth) + kh*((size_t)kW*outputHeight*outputWidth) + kw*((size_t)outputHeight*outputWidth);
+        real *dst = input_data + nip*((size_t)inputHeight*inputWidth);
+        if (padW > 0 || padH > 0) {
+          int lpad,rpad;
+          for(y = 0; y < outputHeight; y++) {
+            iy = (long)y*dH - padH + kh;
+            if (iy < 0 || iy >= inputHeight) {
+            } else {
+              if (dW==1){
+                 ix = 0 - padW + kw;
+                 lpad = fmaxf(0,padW-kw);
+                 rpad = fmaxf(0,padW-(kW-kw-1));
+                 real *dst_slice = dst+(size_t)iy*inputWidth+ix+lpad;
+                 THVector_(cadd)(dst_slice, dst_slice, src+(size_t)y*outputWidth+lpad, 1, outputWidth - lpad - rpad); /* note: THVector_add could handle 1 value better */
+              }
+              else{
+                for (x=0; x<outputWidth; x++){
+                   ix = (long)x*dW - padW + kw;
+                   if (ix < 0 || ix >= inputWidth){
+                   }else{
+                     real *dst_slice = dst+(size_t)iy*inputWidth+ix;
+                     THVector_(cadd)(dst_slice, dst_slice, src+(size_t)y*outputWidth+x, 1, 1);
+                   }
+                }
+              }
+            }
+          }
+        } else {
+          for(y = 0; y < outputHeight; y++) {
+            iy = (long)y*dH + kh;
+            ix = 0 + kw;
+            if (dW == 1 ) {
+               real *dst_slice = dst+(size_t)iy*inputWidth+ix;
+               THVector_(cadd)(dst_slice, dst_slice, src+(size_t)y*outputWidth, 1, outputWidth); /* note: THVector_add could handle 1 value better */
+            }else{
+              for(x = 0; x < outputWidth; x++) {
+                real *dst_slice = dst+(size_t)iy*inputWidth+ix+x*dW;
+                THVector_(cadd)(dst_slice, dst_slice, src+(size_t)y*outputWidth+x, 1, 1);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 
 template <typename scalar_t>
 __device__ scalar_t deform_conv2d_im2col_bilinear(
