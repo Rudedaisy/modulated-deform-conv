@@ -1,0 +1,3 @@
+export CUDA_HOME=/usr/local/cuda
+nsys profile python my_test.py
+/usr/local/cuda/bin/nv-nsight-cu-cli --target-processes all python my_test.py
