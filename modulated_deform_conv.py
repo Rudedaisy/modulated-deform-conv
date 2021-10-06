@@ -6,80 +6,11 @@ from torch.autograd.function import once_differentiable
 from torch.nn.modules.utils import _pair,_triple
 import MDCONV_CUDA
 
-class GEMMDeformConv2dFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, offset, weight, bias=None, stride=1, padding=0, dilation=1,
-                groups=1, deformable_groups=1 , in_step=64):
-        ctx.stride = _pair(stride)
-        ctx.padding = _pair(padding)
-        ctx.dilation = _pair(dilation)
-        ctx.groups = groups
-        ctx.deformable_groups = deformable_groups
-        ctx.in_step = in_step
-        ctx.with_bias = bias is not None
-        if not ctx.with_bias:
-            bias = input.new_empty(0)  # fake tensor                                                                                                                                          
-        if not input.is_cuda:
-            raise NotImplementedError
-        if weight.requires_grad or offset.requires_grad or input.requires_grad:
-            ctx.save_for_backward(input, offset, weight, bias)
-        output_shape = DeformConv2dFunction._infer_shape(ctx, input, weight)
-        output = input.new_empty(output_shape)
-
-
-        MDCONV_CUDA.deform_conv2d_forward_cuda(
-            input, weight, bias, offset, output,
-            weight.shape[2],weight.shape[3],
-            ctx.stride[0], ctx.stride[1],
-            ctx.padding[0], ctx.padding[1],
-            ctx.dilation[0],ctx.dilation[1],
-            ctx.groups, ctx.deformable_groups,ctx.in_step, ctx.with_bias)
-        
-        
-        return output
-        
-    @staticmethod
-    # @once_differentiabl
-    def backward(ctx, grad_output):
-        grad_output=grad_output.contiguous()
-        if not grad_output.is_cuda:
-            raise NotImplementedError
-        input, offset, weight, bias = ctx.saved_tensors
-        grad_input = torch.zeros_like(input)
-        grad_offset = torch.zeros_like(offset)
-        grad_weight = torch.zeros_like(weight)
-        grad_bias = torch.zeros_like(bias)
-        #""" ########## UNCOMMENT THIS BEFORE PROFILING
-        MDCONV_CUDA.deform_conv2d_backward_cuda(
-            input, weight, bias, offset,
-            grad_input, grad_weight,grad_bias,grad_offset, grad_output,
-            weight.shape[2], weight.shape[3],
-            ctx.stride[0], ctx.stride[1],
-            ctx.padding[0], ctx.padding[1],
-            ctx.dilation[0], ctx.dilation[1],
-            ctx.groups, ctx.deformable_groups,ctx.in_step,ctx.with_bias)
-        #"""
-        if not ctx.with_bias:
-            grad_bias = None
-
-        # print(grad_input,grad_offset,grad_weight,grad_bias)
-        
-        return grad_input, grad_offset, grad_weight, grad_bias, None, None, None, None,None,None
-
-    @staticmethod
-    def _infer_shape(ctx, input, weight):
-        n = input.size(0)
-        channels_out = weight.size(0)
-        height, width = input.shape[2:4]
-        kernel_h, kernel_w = weight.shape[2:4]
-        height_out = (height + 2 * ctx.padding[0] - (ctx.dilation[0] *(kernel_h - 1) + 1)) // ctx.stride[0] + 1
-        width_out = (width + 2 * ctx.padding[1] - (ctx.dilation[1] *(kernel_w - 1) + 1)) // ctx.stride[1] + 1
-        return n, channels_out, height_out, width_out
-    
 class DeformConv2dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, offset, weight, bias=None, stride=1, padding=0, dilation=1,
                 groups=1, deformable_groups=1 , in_step=64):
+
         ctx.stride = _pair(stride)
         ctx.padding = _pair(padding)
         ctx.dilation = _pair(dilation)
@@ -102,15 +33,7 @@ class DeformConv2dFunction(torch.autograd.Function):
             ctx.padding[0], ctx.padding[1],
             ctx.dilation[0],ctx.dilation[1],
             ctx.groups, ctx.deformable_groups,ctx.in_step, ctx.with_bias)
-        '''
-        int deform_conv2d_forward_cuda(
-            at::Tensor input, at::Tensor weight, at::Tensor bias,
-            at::Tensor offset, at::Tensor output,
-            const int kernel_h, const int kernel_w, const int stride_h, const int stride_w,
-            const int pad_h, const int pad_w, const int dilation_h,
-            const int dilation_w, const int group, const int deformable_group,
-            const int in_step,const bool with_bias);
-        '''
+
         return output
 
     @staticmethod
@@ -133,20 +56,8 @@ class DeformConv2dFunction(torch.autograd.Function):
             ctx.dilation[0], ctx.dilation[1],
             ctx.groups, ctx.deformable_groups,ctx.in_step,ctx.with_bias)
 
-        '''
-        int deform_conv2d_backward_cuda(
-            at::Tensor input, at::Tensor weight, at::Tensor bias,at::Tensor offset,
-            at::Tensor grad_input, at::Tensor grad_weight, at::Tensor grad_bias,
-            at::Tensor grad_offset, at::Tensor grad_output,
-            const int kernel_h,const int kernel_w,const int stride_h,const int stride_w,
-            const int pad_h,const int pad_w,const int dilation_h,const int dilation_w,
-            const int group,const int deformable_group, const int in_step,const bool with_bias);
-
-        '''
         if not ctx.with_bias:
             grad_bias = None
-
-        # print(grad_input,grad_offset,grad_weight,grad_bias)
 
         return grad_input, grad_offset, grad_weight, grad_bias, None, None, None, None,None,None
 
@@ -160,6 +71,72 @@ class DeformConv2dFunction(torch.autograd.Function):
         width_out = (width + 2 * ctx.padding[1] - (ctx.dilation[1] *(kernel_w - 1) + 1)) // ctx.stride[1] + 1
         return n, channels_out, height_out, width_out
 
+class FusedDeformConv2dFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, offset_weight, weight, bias=None, stride=1, padding=0, dilation=1,
+                groups=1, deformable_groups=1 , in_step=64):
+
+        ctx.stride = _pair(stride)
+        ctx.padding = _pair(padding)
+        ctx.dilation = _pair(dilation)
+        ctx.groups = groups
+        ctx.deformable_groups = deformable_groups
+        ctx.in_step = in_step
+        ctx.with_bias = bias is not None
+        if not ctx.with_bias:
+            bias = input.new_empty(0)  # fake tensor                                                                                                                                          
+        if not input.is_cuda:
+            raise NotImplementedError
+        if weight.requires_grad or offset_weight.requires_grad or input.requires_grad:
+            ctx.save_for_backward(input, offset_weight, weight, bias)
+        offset = input.new_empty(DeformConv2dFunction._infer_shape(ctx, input, offset_weight))
+        output = input.new_empty(DeformConv2dFunction._infer_shape(ctx, input, weight))
+
+        MDCONV_CUDA.deform_conv2d_forward_cuda(
+            input, weight, bias, offset_weight, output, offset,
+            weight.shape[2],weight.shape[3],
+            ctx.stride[0], ctx.stride[1],
+            ctx.padding[0], ctx.padding[1],
+            ctx.dilation[0],ctx.dilation[1],
+            ctx.groups, ctx.deformable_groups,ctx.in_step, ctx.with_bias)
+
+        return output
+        
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output, grad_offset):
+        grad_output=grad_output.contiguous()
+        grad_offset=grad_offset.contiguous()
+        if not grad_output.is_cuda or grad_offset.is_cuda:
+            raise NotImplementedError
+        input, offset_weight, weight, bias = ctx.saved_tensors
+        grad_input = torch.zeros_like(input)
+        grad_offset_weight = torch.zeros_like(offset_weight)
+        grad_weight = torch.zeros_like(weight)
+        grad_bias = torch.zeros_like(bias)
+        MDCONV_CUDA.deform_conv2d_backward_cuda(
+            input, weight, bias, offset_weight,
+            grad_input, grad_weight,grad_bias,grad_offset_weight, grad_output, grad_offset,
+            weight.shape[2], weight.shape[3],
+            ctx.stride[0], ctx.stride[1],
+            ctx.padding[0], ctx.padding[1],
+            ctx.dilation[0], ctx.dilation[1],
+            ctx.groups, ctx.deformable_groups,ctx.in_step,ctx.with_bias)
+        if not ctx.with_bias:
+            grad_bias = None
+
+        return grad_input, grad_offset_weight, grad_weight, grad_bias, None, None, None, None,None,None
+
+    @staticmethod
+    def _infer_shape(ctx, input, weight):
+        n = input.size(0)
+        channels_out = weight.size(0)
+        height, width = input.shape[2:4]
+        kernel_h, kernel_w = weight.shape[2:4]
+        height_out = (height + 2 * ctx.padding[0] - (ctx.dilation[0] *(kernel_h - 1) + 1)) // ctx.stride[0] + 1
+        width_out = (width + 2 * ctx.padding[1] - (ctx.dilation[1] *(kernel_w - 1) + 1)) // ctx.stride[1] + 1
+        return n, channels_out, height_out, width_out
+    
 class ModulatedDeformConv2dFunction(Function):
     @staticmethod
     def forward(ctx, input, offset, mask, weight, bias=None, stride=1, padding=0, dilation=1,
@@ -416,8 +393,8 @@ class ModulatedDeformConv3dFunction(Function):
         length_out = (length + 2 * ctx.padding[2] - (ctx.dilation[2] * (kernel_l - 1) + 1)) // ctx.stride[2] + 1
         return n, channels_out, height_out, width_out, length_out
 
-#deform_conv2d = GEMMDeformConv2dFunction.apply
 deform_conv2d = DeformConv2dFunction.apply
+fused_deform_conv2d = FuzedDeformConv2dFunction.apply
 modulated_deform_conv2d = ModulatedDeformConv2dFunction.apply
 deform_conv3d = DeformConv3dFunction.apply
 modulated_deform_conv3d = ModulatedDeformConv3dFunction.apply
@@ -443,6 +420,9 @@ class DeformConv2d(nn.Module):
         self.deformable_groups = deformable_groups
         self.in_step=in_step
 
+        # Offset conv is BUILT-IN to the DeformConv2d layer
+        self.offset_conv = nn.Conv2d(in_channels, 2*kernel_size[0]*kernel_size[1]*deformable_groups, kernel_size, stride, padding, dilation, groups, bias=False)
+        
         self.weight = nn.Parameter(
             torch.Tensor(out_channels, in_channels // self.groups, *self.kernel_size))
         self.with_bias=bias
@@ -459,16 +439,68 @@ class DeformConv2d(nn.Module):
             n *= k
         stdv = 1. / math.sqrt(n)
         self.weight.data.uniform_(-stdv, stdv)
+        self.offset_conv.weight.data.uniform_(-stdv, stdv)
         if self.with_bias:
             self.bias.data.fill_(0)
 
-    def forward(self, x, offset):
+    def forward(self, x):
+        offset = self.offset_conv(x)
+        
         return deform_conv2d(x, offset, self.weight, self.bias, self.stride, self.padding, self.dilation,
                            self.groups, self.deformable_groups,self.in_step)
 
     # def forward(ctx, input, offset, weight, bias=None, stride=1, padding=0, dilation=1,
     #             groups=1, deformable_groups=1 , in_step=64):
 
+class FusedDeformConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
+                 groups=1, deformable_groups=1, bias=False,in_step=64):
+        super(FusedDeformConv2d, self).__init__()
+        assert in_channels % groups == 0, \
+            'in_channels {} cannot be divisible by groups {}'.format(
+                in_channels, groups)
+        assert out_channels % groups == 0, \
+            'out_channels {} cannot be divisible by groups {}'.format(
+                out_channels, groups)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = _pair(kernel_size)
+        self.stride = _pair(stride)
+	self.padding = _pair(padding)
+        self.dilation = _pair(dilation)
+        self.groups = groups
+        self.deformable_groups = deformable_groups
+        self.in_step=in_step
+
+        self.offset_conv_weight = nn.Parameter(
+            torch.Tensor(2*R*S*deformable_groups,H,W))
+        
+        self.weight = nn.Parameter(
+            torch.Tensor(out_channels, in_channels // self.groups, *self.kernel_size))
+        self.with_bias=bias
+        if self.with_bias:
+            self.bias = nn.Parameter(torch.Tensor(out_channels))
+        else:
+            self.bias=None
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        n = self.in_channels
+        for k in self.kernel_size:
+            n *= k
+        stdv = 1. / math.sqrt(n)
+        self.weight.data.uniform_(-stdv, stdv)
+        self.offset_conv_data.uniform_(-stdv, stdv)
+        if self.with_bias:
+            self.bias.data.fill_(0)
+
+    def forward(self, x):
+
+        return fused_deform_conv2d(x, self.offset_conv_weight, self.weight, self.bias, self.stride, self.padding, self.dilation,
+                           self.groups, self.deformable_groups,self.in_step)
+    
 class ModulatedDeformConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
                  groups=1, deformable_groups=1, bias=False,in_step=64):
