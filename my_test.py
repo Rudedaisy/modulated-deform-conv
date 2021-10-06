@@ -1,4 +1,5 @@
 from modulated_deform_conv import *
+#"""
 batch=16
 H=64
 W=64
@@ -11,16 +12,32 @@ stride=1
 padding=1
 dilation=1
 groups=1
-deformable_groups=512 #1
+deformable_groups=512 # 512 #1
 
 in_step=16384
+#"""
+"""
+batch=16
+H=32
+W=32
+C=32
+K=32
+R=3
+S=3
 
+stride=1
+padding=1
+dilation=1
+groups=1
+deformable_groups=512
+in_step=16384
+"""
 cpudata=torch.rand(batch,C,H,W,requires_grad=True)
 # data=torch.ones(batch,1,5,5,device='cuda',requires_grad=True)
 data=cpudata.cuda()
 offset=torch.zeros(batch,2*R*S*deformable_groups,H,W,device='cuda',requires_grad=True)
 mask=torch.ones(batch,R*S,H,W,device='cuda',requires_grad=True)
-weight=torch.rand(K,C,H,W,device='cuda',requires_grad=True)
+weight=torch.rand(K,C,R,S,device='cuda',requires_grad=True)
 bias=torch.zeros(C,device='cuda',requires_grad=True)
 '''
 class DeformConv2dFunction(Function):
@@ -36,13 +53,13 @@ mask.retain_grad()
 weight.retain_grad()
 bias.retain_grad()
 
-print("--Input data--")
-print(data)
+#print("--Input data--")
+#print(data)
 out=deform_conv2d(data,offset,weight,bias,stride,padding,dilation,groups,deformable_groups,in_step)
 #out=modulated_deform_conv2d(data,offset,mask,weight,bias,stride,padding,dilation,groups,deformable_groups,in_step)
-print("--Output data--")
-print(out)
-
+#print("--Output data--")
+#print(out)
+exit()
 cpudata.retain_grad()
 data.retain_grad()
 offset.retain_grad()
@@ -51,20 +68,20 @@ weight.retain_grad()
 bias.retain_grad()
 
 loss=out.sum()
-print("--Loss--")
-print(loss)
-print("--Data grad--")
-print(data.grad)
-print("--Offset grad--")
-print(offset.grad)
-print("--Weight grad--")
-print(weight.grad)
-print("--Bias grad--")
-print(bias.grad)
+#print("--Loss--")
+#print(loss)
+#print("--Data grad--")
+#print(data.grad)
+#print("--Offset grad--")
+#print(offset.grad)
+#print("--Weight grad--")
+#print(weight.grad)
+#print("--Bias grad--")
+#print(bias.grad)
 loss.backward()
-print("--Data grad after loss.backward()--")
-print(data.grad)
-print("--CPU data grad--")
-print(cpudata.grad)
-print("--Bias grad--")
-print(bias.grad)
+#print("--Data grad after loss.backward()--")
+#print(data.grad)
+#print("--CPU data grad--")
+#print(cpudata.grad)
+#print("--Bias grad--")
+#print(bias.grad)

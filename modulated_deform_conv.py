@@ -26,14 +26,7 @@ class GEMMDeformConv2dFunction(torch.autograd.Function):
         output_shape = DeformConv2dFunction._infer_shape(ctx, input, weight)
         output = input.new_empty(output_shape)
 
-        # UNROLL HERE
-        # might need to use view() on weights
-        unfold = nn.Unfold(kernel_size=(3,3), dilation=1, padding=1, stride=1)
-        unfolded_input = unfold(input) # just an example... will need to use CUDA kernel to unfold using offsets
-        
-        
-        # CALL GEMM KERNEL HERE
-        #"""
+
         MDCONV_CUDA.deform_conv2d_forward_cuda(
             input, weight, bias, offset, output,
             weight.shape[2],weight.shape[3],
@@ -41,11 +34,8 @@ class GEMMDeformConv2dFunction(torch.autograd.Function):
             ctx.padding[0], ctx.padding[1],
             ctx.dilation[0],ctx.dilation[1],
             ctx.groups, ctx.deformable_groups,ctx.in_step, ctx.with_bias)
-        #"""
-
-        # FOLD/VIEW to correct output shape
-        output = output.view(output_shape)
-
+        
+        
         return output
         
     @staticmethod
@@ -426,6 +416,7 @@ class ModulatedDeformConv3dFunction(Function):
         length_out = (length + 2 * ctx.padding[2] - (ctx.dilation[2] * (kernel_l - 1) + 1)) // ctx.stride[2] + 1
         return n, channels_out, height_out, width_out, length_out
 
+#deform_conv2d = GEMMDeformConv2dFunction.apply
 deform_conv2d = DeformConv2dFunction.apply
 modulated_deform_conv2d = ModulatedDeformConv2dFunction.apply
 deform_conv3d = DeformConv3dFunction.apply
