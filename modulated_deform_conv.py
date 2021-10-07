@@ -9,13 +9,14 @@ import MDCONV_CUDA
 class DeformConv2dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, offset, weight, bias=None, stride=1, padding=0, dilation=1,
-                groups=1, deformable_groups=1 , in_step=64):
+                groups=1, deformable_groups=1 , KG=1, in_step=64):
 
         ctx.stride = _pair(stride)
         ctx.padding = _pair(padding)
         ctx.dilation = _pair(dilation)
         ctx.groups = groups
         ctx.deformable_groups = deformable_groups
+        ctx.KG = KG
         ctx.in_step = in_step
         ctx.with_bias = bias is not None
         if not ctx.with_bias:
@@ -32,7 +33,7 @@ class DeformConv2dFunction(torch.autograd.Function):
             ctx.stride[0], ctx.stride[1],
             ctx.padding[0], ctx.padding[1],
             ctx.dilation[0],ctx.dilation[1],
-            ctx.groups, ctx.deformable_groups,ctx.in_step, ctx.with_bias)
+            ctx.groups, ctx.deformable_groups, ctx.KG, ctx.in_step, ctx.with_bias)
 
         return output
 
@@ -54,12 +55,12 @@ class DeformConv2dFunction(torch.autograd.Function):
             ctx.stride[0], ctx.stride[1],
             ctx.padding[0], ctx.padding[1],
             ctx.dilation[0], ctx.dilation[1],
-            ctx.groups, ctx.deformable_groups,ctx.in_step,ctx.with_bias)
+            ctx.groups, ctx.deformable_groups, ctx.KG, ctx.in_step,ctx.with_bias)
 
         if not ctx.with_bias:
             grad_bias = None
 
-        return grad_input, grad_offset, grad_weight, grad_bias, None, None, None, None,None,None
+        return grad_input, grad_offset, grad_weight, grad_bias, None, None, None, None,None,None,None
 
     @staticmethod
     def _infer_shape(ctx, input, weight):
@@ -401,7 +402,7 @@ modulated_deform_conv3d = ModulatedDeformConv3dFunction.apply
 
 class DeformConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
-                 groups=1, deformable_groups=1, bias=False,in_step=64):
+                 groups=1, deformable_groups=1, KG=1, bias=False,in_step=64):
         super(DeformConv2d, self).__init__()
         assert in_channels % groups == 0, \
             'in_channels {} cannot be divisible by groups {}'.format(
@@ -418,10 +419,11 @@ class DeformConv2d(nn.Module):
         self.dilation = _pair(dilation)
         self.groups = groups
         self.deformable_groups = deformable_groups
+        self.KG = KG
         self.in_step=in_step
 
         # Offset conv is BUILT-IN to the DeformConv2d layer
-        self.offset_conv = nn.Conv2d(in_channels, 2*kernel_size[0]*kernel_size[1]*deformable_groups, kernel_size, stride, padding, dilation, groups, bias=False)
+        self.offset_conv = nn.Conv2d(in_channels, KG*deformable_groups*kernel_size[0]*kernel_size[1]*2, kernel_size, stride, padding, dilation, deformable_groups, bias=False)
         
         self.weight = nn.Parameter(
             torch.Tensor(out_channels, in_channels // self.groups, *self.kernel_size))
@@ -447,7 +449,7 @@ class DeformConv2d(nn.Module):
         offset = self.offset_conv(x)
         #return offset
         return deform_conv2d(x, offset, self.weight, self.bias, self.stride, self.padding, self.dilation,
-                           self.groups, self.deformable_groups,self.in_step)
+                             self.groups, self.deformable_groups, self.KG, self.in_step)
 
     # def forward(ctx, input, offset, weight, bias=None, stride=1, padding=0, dilation=1,
     #             groups=1, deformable_groups=1 , in_step=64):
@@ -474,7 +476,7 @@ class FusedDeformConv2d(nn.Module):
         self.in_step=in_step
 
         self.offset_conv_weight = nn.Parameter(
-            torch.Tensor(2*R*S*deformable_groups,H,W))
+            torch.Tensor(self.deformable_groups*self.kernel_size[0]*self.kernel_size[1]*2, in_channels, *self.kernel_size))
         
         self.weight = nn.Parameter(
             torch.Tensor(out_channels, in_channels // self.groups, *self.kernel_size))
