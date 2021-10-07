@@ -394,7 +394,7 @@ class ModulatedDeformConv3dFunction(Function):
         return n, channels_out, height_out, width_out, length_out
 
 deform_conv2d = DeformConv2dFunction.apply
-fused_deform_conv2d = FuzedDeformConv2dFunction.apply
+fused_deform_conv2d = FusedDeformConv2dFunction.apply
 modulated_deform_conv2d = ModulatedDeformConv2dFunction.apply
 deform_conv3d = DeformConv3dFunction.apply
 modulated_deform_conv3d = ModulatedDeformConv3dFunction.apply
@@ -445,7 +445,7 @@ class DeformConv2d(nn.Module):
 
     def forward(self, x):
         offset = self.offset_conv(x)
-        
+        #return offset
         return deform_conv2d(x, offset, self.weight, self.bias, self.stride, self.padding, self.dilation,
                            self.groups, self.deformable_groups,self.in_step)
 
@@ -467,7 +467,7 @@ class FusedDeformConv2d(nn.Module):
         self.out_channels = out_channels
         self.kernel_size = _pair(kernel_size)
         self.stride = _pair(stride)
-	self.padding = _pair(padding)
+        self.padding = _pair(padding)
         self.dilation = _pair(dilation)
         self.groups = groups
         self.deformable_groups = deformable_groups

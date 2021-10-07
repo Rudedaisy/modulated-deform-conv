@@ -12,7 +12,7 @@ stride=1
 padding=1
 dilation=1
 groups=1
-deformable_groups=512 # 512 #1
+deformable_groups=1 # 512 #1
 
 in_step=16384
 #"""
@@ -36,6 +36,7 @@ device = torch.device('cuda')
 cpudata=torch.rand(batch,C,H,W,requires_grad=True)
 # data=torch.ones(batch,1,5,5,device='cuda',requires_grad=True)
 data=cpudata.cuda()
+#offset=torch.zeros(batch,deformable_groups*2*R*S,H,W,device='cuda',requires_grad=True)
 
 model = DeformConv2d(C, K, (R,S), stride, padding, dilation, groups, deformable_groups=deformable_groups, in_step=in_step)
 model = model.to(device)
