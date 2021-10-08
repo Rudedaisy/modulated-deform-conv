@@ -50,6 +50,13 @@ __device__ scalar_t fused_deform_conv2d_im2col_bilinear(
 }
 
 template <typename scalar_t>
+__global__ void fused_deform_conv2d_gpu_kernel()
+{
+  printf("Size of data: %d\n", sizeof(scalar_t));
+  return;
+}
+
+template <typename scalar_t>
 __global__ void fused_conv2d_im2col_gpu_kernel(
                 const int n, const scalar_t *data_im,
         const int height, const int width, const int kernel_h, const int kernel_w,
@@ -142,6 +149,59 @@ __global__ void fused_deform_conv2d_im2col_gpu_kernel(
         data_col_ptr += batch_size * height_col * width_col;
       }
   }
+}
+
+void fused_deform_conv2d_cuda(
+    at::Tensor data_im, at::Tensor data_offset, at::Tensor weight, at::Tensor offset_weight,
+    const int batch_size, const int channels, const int height_im, const int width_im,
+    const int height_out, const int width_out, const int kernel_h, const int kernel_w,
+    const int pad_h, const int pad_w, const int stride_h, const int stride_w,
+    const int dilation_h, const int dilation_w, const int deformable_group,
+    at::Tensor data_output)
+{
+  // num_axes should be smaller than block size
+  const int channel_per_deformable_group = channels / deformable_group;
+  
+  // Threads per block should match Tile size
+  // 32 threads constitute a warp
+  // Several warps constitute a thread block
+  // Several thread blocks constitute a Streaming Multiprocessor (up to 8 blocks) - may want to fit 2 blocks at a time to parallelize data fetch and execute
+  // SM has 128KB L1 cache, 6MB L2 cache total (in the rtx3090)
+  // Matrix A dims: {NQP, CRS}
+  // Matrix B dims: {CRS, K}
+  // Matrix C dims: {NQP, K}
+  // Input format: NCHW
+  // Weight and offset_weight format: GKCRS
+  // Output and offset format: GKNQP
+  // 128 cache line means that minimum Width = 128 / data_size
+  // Tiles should be based off OUTPUT spatial dimension
+  
+  const int L1_size = 128*1024;
+  const	int L1_line_size = 128;
+  const	int data_size =	sizeof(data_im.scalar_type());
+
+  const int num_kernels = channels * batch_size * height_out * width_out; // NEED TO CHANGE FOR TILING
+
+  printf("Size of data: %d\n", sizeof(data_im.scalar_type()));
+  exit(0);
+  
+  // CONSIDER PADDING -- need partial overlap between Blocks
+  int numBlocks = GET_BLOCKS(num_kernels);
+  dim3 threadsPerBlock(CUDA_NUM_THREADS, 1);
+  /*
+  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+      data_im.scalar_type(), "fused_deform_conv2d_gpu_kernel", ([&] {
+        const scalar_t *data_im_ = data_im.data<scalar_t>();
+        scalar_t *data_output_ = data_output.data<scalar_t>();
+
+        fused_deform_conv2d_gpu_kernel<<<GET_BLOCKS(1), 1>>>();
+	//fused_deform_conv2d_gpu_kernel<<<numBlocks, threadsPerBlock>>>();
+      }));
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess)
+  {
+    printf("error in fused_deform_conv2d_cuda: %s\n", cudaGetErrorString(err));
+  } */
 }
 
 void fused_conv2d_im2col_cuda(
@@ -255,8 +315,6 @@ int fused_deform_conv2d_forward_cuda(
   at::Tensor offset_columns = at::zeros({channels * kernel_h * kernel_w,
 	                  step * height_out * width_out},offset.options());
   input=input.view({batch/step,step,channels,height,width});
-  //offset=offset.view({batch/step,step,deformable_group * 2 *kernel_h*kernel_w,height_out,width_out});
-  //offset.zero_();
   
   // divide into group
   output = output.view({batch/step, group, output.size(1) / group,step,
@@ -269,6 +327,11 @@ int fused_deform_conv2d_forward_cuda(
 	                offset_weight.size(2), offset_weight.size(3)});
   
   for (int b = 0; b < batch/step; b++) {
+    fused_deform_conv2d_cuda(
+			     input[b], offset[b], weight, offset_weight, step, channels, height, width, height_out,
+			     width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
+			     dilation_h, dilation_w, deformable_group, output[b]);
+    /*
     // Offset CONV - unroll
     offset_columns.fill_(0);
     fused_conv2d_im2col_cuda(
@@ -276,12 +339,8 @@ int fused_deform_conv2d_forward_cuda(
 	width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
 	dilation_h, dilation_w, deformable_group, offset_columns);
     offset_columns = offset_columns.view({deformable_group, offset_columns.size(0) / deformable_group, offset_columns.size(1)});
-    //printf("offset_weight dimensions: %d %d %d %d %d\n", offset_weight.size(0), offset_weight.size(1), offset_weight.size(2), offset_weight.size(3), offset_weight.size(4));
-    //printf("offset_columns dimensions: %d %d %d\n", offset_columns.size(0), offset_columns.size(1), offset_columns.size(2));
-    //printf("offset dimensions: %d %d %d %d %d\n", offset.size(0), offset.size(1), offset.size(2), offset.size(3), offset.size(4));
+
     // Offset CONV
-    //offset[b] = offset[b].flatten(1)
-    //                   .addmm_(offset_weight[0].flatten(1), offset_columns[0]).view_as(offset[b]);
     for (int g = 0; g < deformable_group; g++) {
       offset[b][g] = offset[b][g].flatten(1)
     	                .addmm_(offset_weight[g].flatten(1), offset_columns[g]).view_as(offset[b][g]);
@@ -297,9 +356,6 @@ int fused_deform_conv2d_forward_cuda(
         dilation_h, dilation_w, deformable_group, columns);
     columns = columns.view({group, columns.size(0) / group, columns.size(1)});
 
-    //printf("weight dimensions: %d %d %d %d %d\n", weight.size(0), weight.size(1), weight.size(2), weight.size(3), weight.size(4));
-    //printf("columns dimensions: %d %d %d\n", columns.size(0), columns.size(1), columns.size(2));
-    //printf("output dimensions: %d %d %d %d %d\n", output.size(0), output.size(1), output.size(2), output.size(3), output.size(4));
     // Main CONV
     for (int g = 0; g < group; g++) {
       output[b][g] = output[b][g].flatten(1)
@@ -309,6 +365,7 @@ int fused_deform_conv2d_forward_cuda(
     columns = columns.view({columns.size(0) * columns.size(1), columns.size(2)});
     offset = offset.view({batch/step, deformable_group, deformable_group * 2 *kernel_h*kernel_w / deformable_group, step,
                         height_out, width_out});
+    */
   }
   weight = weight.view({weight.size(0) * weight.size(1), weight.size(2),
                         weight.size(3), weight.size(4)});
