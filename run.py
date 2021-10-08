@@ -35,20 +35,16 @@ in_step=16384
 """
 device = torch.device('cuda')
 cpudata=torch.rand(batch,C,H,W,requires_grad=True)
-# data=torch.ones(batch,1,5,5,device='cuda',requires_grad=True)
 data=cpudata.cuda()
 #offset=torch.zeros(batch,deformable_groups*2*R*S,H,W,device='cuda',requires_grad=True)
 
-model = DeformConv2d(C, K, (R,S), stride, padding, dilation, groups, deformable_groups=deformable_groups, KG=KG, in_step=in_step)
+#model = DeformConv2d(C, K, (R,S), stride, padding, dilation, groups, deformable_groups=deformable_groups, KG=KG, in_step=in_step)
+model = FusedDeformConv2d(C, K, (R,S), stride, padding, dilation, groups, deformable_groups=deformable_groups, KG=KG, in_step=in_step)
 model = model.to(device)
-
-#cpudata.retain_grad()
-#data.retain_grad()
 
 output = model(data)
 
-#cpudata.retain_grad()
-#data.retain_grad()
 loss=output.sum()
+exit()
 loss.backward()
 
