@@ -30,7 +30,7 @@ namespace py = pybind11;
     
       
 const int CUDA_NUM_THREADS = 1024;
-const int MAX_GRID_NUM = 65535*65535*65535;
+const int MAX_GRID_NUM = 1; //65535;
 
 // const int CUDA_NUM_THREADS = 1;
 // const int MAX_GRID_NUM = 1;
