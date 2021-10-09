@@ -43,6 +43,7 @@ model = FusedDeformConv2d(C, K, (R,S), stride, padding, dilation, groups, deform
 model = model.to(device)
 
 output = model(data)
+output2 = model(data)
 
 loss=output.sum()
 exit()
