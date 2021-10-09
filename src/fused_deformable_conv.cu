@@ -2,6 +2,7 @@
 // ^ The above line lets emacs visualize this as a c++ file
 
 #include "config.h"
+#include <algorithm>
 
 template <typename scalar_t>
 __device__ scalar_t fused_conv2d_im2col(
@@ -151,12 +152,52 @@ __global__ void fused_deform_conv2d_im2col_gpu_kernel(
   }
 }
 
+int tile_size(const int N, const int K, const int C, const int R, const int S,
+	      const int group, const int deformable_group,
+	      const int stride_h, const int stride_w, const int dilation_h, const int dilation_w,
+	      const int tile_H, const int tile_W, const int data_size)
+{
+  // SM has 128KB L1 cache, 6MB L2 cache total (in the rtx3090)
+  // Matrix A dims: {NPQ, CRS}
+  // Matrix B dims: {CRS, K}
+  // Matrix C dims: {NPQ, K}
+  // Input format: NCHW
+  // Weight and offset_weight format: GKCRS
+  // Output and offset format: GKNQP
+  // Tiles should be based off INPUT spatial dimension
+  // UNIQUE structures: IFM (oconv_A and bli_A<partial>), offset_weight (oconv_B), offset (oconv_C), deformed_IFM (mconv_A), weight (mconv_B), output (mconv_C)
+  const int tile_P = (tile_H - 2*((R*dilation_h)/2)) / stride_h;
+  const int tile_Q = (tile_W - 2*((S*dilation_w)/2)) / stride_w;
+  
+  // ----- Offset conv -----
+  const int oconv_A = N*tile_P*tile_Q * C*R*S * data_size;
+  const int oconv_B = C*R*S * deformable_group*R*S*2 * data_size;
+  const int oconv_C = N*tile_P*tile_Q * deformable_group*R*S*2 * data_size;
+  printf("Size of offset conv tile: %d\n", oconv_A+oconv_B+oconv_C);
+  
+  // BLI - partial reuse of oconv_A data, may use other cache lines ==> NEED STATISTIC FOR OFFSET DISTRIBUTION
+  const int bli_in = N*tile_P*tile_Q * R*S*4 * data_size;
+  
+  // ----- Main conv -----
+  // Note: oconv_A, oconv_B, and oconv_C not needed after mconv_A created
+  const int mconv_A = N*tile_P*tile_Q * C*R*S * data_size;
+  printf("Size of BLI operation: %d\n", bli_in+mconv_A);
+  const int mconv_B = C*R*S * K * data_size;
+  const int mconv_C = N*tile_P*tile_Q * K * data_size;
+  printf("Size of main conv tile: %d\n", mconv_A+mconv_B+mconv_C);
+  
+  const int max1 = std::max(oconv_A+oconv_B+oconv_C, bli_in+mconv_A);
+  const int max2 = std::max(max1, mconv_A+mconv_B+mconv_C);
+  
+  return max2;
+}
+
 void fused_deform_conv2d_cuda(
     at::Tensor data_im, at::Tensor data_offset, at::Tensor weight, at::Tensor offset_weight,
-    const int batch_size, const int channels, const int height_im, const int width_im,
+    const int batch_size, const int channels, const int channels_out, const int height_im, const int width_im,
     const int height_out, const int width_out, const int kernel_h, const int kernel_w,
     const int pad_h, const int pad_w, const int stride_h, const int stride_w,
-    const int dilation_h, const int dilation_w, const int deformable_group,
+    const int dilation_h, const int dilation_w, const int group, const int deformable_group,
     at::Tensor data_output)
 {
   // num_axes should be smaller than block size
@@ -167,26 +208,33 @@ void fused_deform_conv2d_cuda(
   // Several warps constitute a thread block
   // Several thread blocks constitute a Streaming Multiprocessor (up to 8 blocks) - may want to fit 2 blocks at a time to parallelize data fetch and execute
   // SM has 128KB L1 cache, 6MB L2 cache total (in the rtx3090)
-  // Matrix A dims: {NQP, CRS}
-  // Matrix B dims: {CRS, K}
-  // Matrix C dims: {NQP, K}
   // Input format: NCHW
   // Weight and offset_weight format: GKCRS
   // Output and offset format: GKNQP
   // 128 cache line means that minimum Width = 128 / data_size
-  // Tiles should be based off OUTPUT spatial dimension
+  // Tiles should be based off INPUT spatial dimension
   
   const int L1_size = 128*1024;
   const	int L1_line_size = 128;
   const	int data_size =	sizeof(data_im.scalar_type());
 
+  const int min_W = L1_line_size / data_size;
+  
+  
   const int num_kernels = channels * batch_size * height_out * width_out; // NEED TO CHANGE FOR TILING
 
-  printf("Size of data: %d\n", sizeof(data_im.scalar_type()));
+  printf("Size of Tile: %d KB\n", tile_size(batch_size, channels_out, channels, kernel_h, kernel_w,
+					 group, deformable_group,
+					 stride_h, stride_w, dilation_h, dilation_w,
+					 3, 3, data_size) / 1024);
+  // RESULT OF TEST: tiling not feasible for fitting inside L1
+  // NEW IDEA: convert NCHW to NHWC --> we want channels dimension inside cache line to that we can use SMALLER H, W
+  // NEW IDEA: try directly pipelining all 3 stages at fine granularity, then gradually make the tile larger
+  // If size of *weight* matrix too much, then just pipeline the first TWO stages instead
+  //               -->  mconv(BLI(oconv(IFM,offset_weight), IFM), weight)
   exit(0);
   
-  // CONSIDER PADDING -- need partial overlap between Blocks
-  int numBlocks = GET_BLOCKS(num_kernels);
+  // CONSIDER PADDING -- need partial overlap between Blocks  int numBlocks = GET_BLOCKS(num_kernels);
   dim3 threadsPerBlock(CUDA_NUM_THREADS, 1);
   /*
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
@@ -328,9 +376,9 @@ int fused_deform_conv2d_forward_cuda(
   
   for (int b = 0; b < batch/step; b++) {
     fused_deform_conv2d_cuda(
-			     input[b], offset[b], weight, offset_weight, step, channels, height, width, height_out,
+			     input[b], offset[b], weight, offset_weight, step, channels, channels_out, height, width, height_out,
 			     width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
-			     dilation_h, dilation_w, deformable_group, output[b]);
+			     dilation_h, dilation_w, group, deformable_group, output[b]);
     /*
     // Offset CONV - unroll
     offset_columns.fill_(0);

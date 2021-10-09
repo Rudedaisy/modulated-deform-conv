@@ -1,6 +1,6 @@
 from modulated_deform_conv import *
 #"""
-batch=16
+batch=8 #16
 H=64
 W=64
 C=512
