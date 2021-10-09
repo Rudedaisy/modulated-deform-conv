@@ -272,65 +272,63 @@ int fused_deform_conv2d_forward_cuda(
   offset = offset.view({batch, deformable_group*2*kernel_h*kernel_w, height_out, width_out});
   offset.zero_();
   // resize temporary columns
-  at::Tensor columns =at::zeros({channels * kernel_h * kernel_w,
+  at::Tensor columns =at::zeros({height_out/tile_height_out, width_out/tile_width_out, channels * kernel_h * kernel_w,
 	  	  	  step * tile_height_out * tile_width_out},input.options());
   at::Tensor offset_columns = at::zeros({channels * kernel_h * kernel_w,
 	                  step * tile_height_out * tile_width_out},offset.options());
   input=input.view({batch/step,step,channels,height,width});
   
   // divide into group
-  output = output.view({batch/step, group, output.size(2)/TILE_H, output.size(3)/TILE_W, output.size(1) / group, step, TILE_H, TILE_W});
-  offset = offset.view({batch/step, deformable_group, offset.size(2)/TILE_H, offset.size(3)/TILE_W, offset.size(1) / deformable_group, step, TILE_H, TILE_W});
+  output = output.view({batch/step, group, output.size(1) / group, step, output.size(2), output.size(3)});
+  offset = offset.view({batch/step, deformable_group, offset.size(2)/tile_height_out, offset.size(3)/tile_width_out, offset.size(1) / deformable_group, step, tile_height_out, tile_width_out});
   weight = weight.view({group, weight.size(0) / group, weight.size(1),
                         weight.size(2), weight.size(3)});
   offset_weight = offset_weight.view({deformable_group, offset_weight.size(0) / deformable_group, offset_weight.size(1),
 	                offset_weight.size(2), offset_weight.size(3)});
 
-  for (int hh = 0; hh < TILE_H; hh++) {
-  for (int ww = 0; ww < TILE_W; ww++) {
   for (int b = 0; b < batch/step; b++) {
-    // Offset CONV - unroll
-    offset_columns.fill_(0);
-    fused_conv2d_im2col_cuda(
-	input[b], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
-	tile_width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
-	dilation_h, dilation_w, deformable_group, offset_columns);
-    offset_columns = offset_columns.view({deformable_group, offset_columns.size(0) / deformable_group, offset_columns.size(1)});
+    for (int hh = 0; hh < height_out/tile_height_out; hh++) {
+    for (int ww = 0; ww < width_out/tile_width_out; ww++) {
+      // Offset CONV - unroll
+      offset_columns.fill_(0);
+      fused_conv2d_im2col_cuda(
+	   input[b], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
+	   tile_width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
+	   dilation_h, dilation_w, deformable_group, offset_columns);
+      offset_columns = offset_columns.view({deformable_group, offset_columns.size(0) / deformable_group, offset_columns.size(1)});
 
-    // Offset CONV
-    for (int g = 0; g < deformable_group; g++) {
-      offset[b][g][hh][ww] = offset[b][g][hh][ww].flatten(1)
+      // Offset CONV
+      for (int g = 0; g < deformable_group; g++) {
+	offset[b][g][hh][ww] = offset[b][g][hh][ww].flatten(1)
     	                .addmm_(offset_weight[g].flatten(1), offset_columns[g]).view_as(offset[b][g][hh][ww]);
-    }
-    offset = offset.view({batch/step,height_out/TILE_H,width_out/TILE_W,step,deformable_group * 2 *kernel_h*kernel_w, TILE_H, TILE_W});
-    offset_columns = offset_columns.view({offset_columns.size(0) * offset_columns.size(1), offset_columns.size(2)});
+      }
+      offset = offset.view({batch/step,height_out/tile_height_out,width_out/tile_width_out,step,deformable_group * 2 *kernel_h*kernel_w, tile_height_out, tile_width_out});
+      offset_columns = offset_columns.view({offset_columns.size(0) * offset_columns.size(1), offset_columns.size(2)});
 
-    // BLI
-    columns.fill_(0);
-    fused_deform_conv2d_im2col_cuda(
-        input[b], offset[b][hh][ww], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
-        tile_width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
-        dilation_h, dilation_w, deformable_group, columns);
-    columns = columns.view({group, columns.size(0) / group, columns.size(1)});
+      // BLI
+      columns[hh][ww].fill_(0);
+      fused_deform_conv2d_im2col_cuda(
+	    input[b], offset[b][hh][ww], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
+	    tile_width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
+	    dilation_h, dilation_w, deformable_group, columns[hh][ww]);
+      offset = offset.view({batch/step,deformable_group,height_out/tile_height_out,width_out/tile_width_out,deformable_group*2*kernel_h*kernel_w/deformable_group,step,tile_height_out,tile_width_out});
+    }
+    }
+    columns = columns.view({group, channels * kernel_h * kernel_w / group, step * height_out * width_out});
 
     // Main CONV
     for (int g = 0; g < group; g++) {
-      output[b][g][hh][ww] = output[b][g][hh][ww].flatten(1)
-                        .addmm_(weight[g].flatten(1), columns[g]).view_as(output[b][g][hh][ww]);
-      
+      output[b][g] = output[b][g].flatten(1)
+                        .addmm_(weight[g].flatten(1), columns[g]).view_as(output[b][g]);
     }
-    columns = columns.view({columns.size(0) * columns.size(1), columns.size(2)});
-    offset = offset.view({batch/step, deformable_group, height_out/TILE_H, width_out/TILE_W, deformable_group * 2 *kernel_h*kernel_w / deformable_group, step, TILE_H, TILE_W});
+    columns = columns.view({height_out/tile_height_out, width_out/tile_width_out, columns.size(0) * columns.size(1), step * tile_height_out * tile_width_out});
+    offset = offset.view({batch/step,deformable_group,height_out/tile_height_out,width_out/tile_width_out,deformable_group*2*kernel_h*kernel_w/deformable_group,step,tile_height_out,tile_width_out});
   }
-  }
-  }
-  
+
   weight = weight.view({weight.size(0) * weight.size(1), weight.size(2),
                         weight.size(3), weight.size(4)});
-  //output = output.view({output.size(0), output.size(1) * output.size(2),
-  //                      output.size(3), output.size(4),output.size(5)});
-  output = output.view({output.size(0), output.size(1) * output.size(4),
-	output.size(5), output.size(2) * output.size(6), output.size(3) * output.size(7)});
+  output = output.view({output.size(0), output.size(1) * output.size(2),
+                        output.size(3), output.size(4),output.size(5)});
   output = output.view({batch / step, channels_out, step, height_out, width_out});
   output.transpose_(1, 2);
   output = output.contiguous().view({batch , channels_out, height_out, width_out});
