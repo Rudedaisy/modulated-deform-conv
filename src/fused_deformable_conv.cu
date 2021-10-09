@@ -10,11 +10,13 @@ __device__ scalar_t fused_conv2d_im2col(
 {
   int h_low = floor(h);
   int w_low = floor(w);
-
-  if (h_low >= 0 && w_low >= 0 && h_high < height && w_high < width)
-    scalar_t val = bottom_data[h_low * data_width + w_low];
-  else
-    scalar_t val = 0;
+  scalar_t val;
+  
+  if (h_low >= 0 && w_low >= 0 && h_low < height && w_low < width) {
+    val = bottom_data[h_low * data_width + w_low];
+  } else {
+    val = 0;
+  }
 
   return val;
 }
