@@ -24,7 +24,7 @@ __device__ scalar_t fused_conv2d_im2col(
 template <typename scalar_t>
 __device__ scalar_t fused_deform_conv2d_im2col_bilinear(
 		const scalar_t *bottom_data, const int data_width,
-        const int height, const int width, scalar_t h, scalar_t w)
+		const int height, const int width, scalar_t h, scalar_t w)
 {
   int h_low = floor(h);
   int w_low = floor(w);
@@ -56,8 +56,9 @@ __device__ scalar_t fused_deform_conv2d_im2col_bilinear(
 
 template <typename scalar_t>
 __global__ void fused_conv2d_im2col_gpu_kernel(
-                const int n, const scalar_t *data_im,
-        const int height, const int width, const int kernel_h, const int kernel_w,
+        const int n, const scalar_t *data_im,
+        const int ww, const int hh, const int height_tile, const int width_tile, const int height, const int width,
+	const int kernel_h, const int kernel_w,
         const int pad_h, const int pad_w,
         const int stride_h, const int stride_w,
         const int dilation_h, const int dilation_w,
@@ -77,8 +78,8 @@ CUDA_KERNEL_LOOP(index, n)
 
     // compute deformable group index
     const int deformable_group_index = c_im / channel_per_deformable_group;
-    const int h_in = h_col * stride_h - pad_h;
-    const int w_in = w_col * stride_w - pad_w;
+    const int h_in = (hh*height_tile) + (h_col * stride_h - pad_h);
+    const int w_in = (ww*width_tile) + (w_col * stride_w - pad_w);
 
     scalar_t *data_col_ptr = data_col + ((c_col * batch_size + b_col) * height_col + h_col) * width_col + w_col;
     const scalar_t *data_im_ptr = data_im + (b_col * num_channels + c_im) * height * width;
@@ -90,8 +91,11 @@ CUDA_KERNEL_LOOP(index, n)
         const scalar_t h_im = h_in + i * dilation_h;
 	const scalar_t w_im = w_in + j * dilation_w;
         if (h_im > -1 && w_im > -1 && h_im < height && w_im < width){
-          val = fused_conv2d_im2col(data_im_ptr, width, height, width, h_im, w_im); // may want to in-line this function
-        }
+          //val = fused_conv2d_im2col(data_im_ptr, width, height, width, h_im, w_im); // may want to in-line this function
+	  val = data_im_ptr[(int)h_im * (int)width + (int)w_im];
+	} else {
+	  val = 0;
+	}
         *data_col_ptr = val;
         data_col_ptr += batch_size * height_col * width_col;
       }
@@ -100,7 +104,8 @@ CUDA_KERNEL_LOOP(index, n)
 
 template <typename scalar_t>
 __global__ void fused_deform_conv2d_im2col_gpu_kernel(
-		const int n, const scalar_t *data_im, const scalar_t *data_offset,
+        const int n, const scalar_t *data_im, const scalar_t *data_offset,
+	const int ww, const int hh, const int height_tile, const int width_tile, 
         const int height, const int width, const int kernel_h, const int kernel_w,
         const int pad_h, const int pad_w,
         const int stride_h, const int stride_w,
@@ -121,9 +126,9 @@ __global__ void fused_deform_conv2d_im2col_gpu_kernel(
 
     // compute deformable group index
     const int deformable_group_index = c_im / channel_per_deformable_group;
-    const int h_in = h_col * stride_h - pad_h;
-    const int w_in = w_col * stride_w - pad_w;
-
+    const int h_in = (hh*height_tile) + (h_col * stride_h - pad_h);
+    const int w_in = (ww*width_tile) + (w_col * stride_w - pad_w);
+    
     scalar_t *data_col_ptr = data_col + ((c_col * batch_size + b_col) * height_col + h_col) * width_col + w_col;
     const scalar_t *data_im_ptr = data_im + (b_col * num_channels + c_im) * height * width;
     const scalar_t *data_offset_ptr = data_offset + (b_col * deformable_group + deformable_group_index) * 2 * kernel_h * kernel_w * height_col * width_col;
@@ -141,7 +146,9 @@ __global__ void fused_deform_conv2d_im2col_gpu_kernel(
         const scalar_t w_im = w_in + j * dilation_w + offset_w;
         if (h_im > -1 && w_im > -1 && h_im < height && w_im < width){
           val = fused_deform_conv2d_im2col_bilinear(data_im_ptr, width, height, width, h_im, w_im);
-        }
+        } else {
+	  val = 0;
+	}
         *data_col_ptr = val;
         data_col_ptr += batch_size * height_col * width_col;
       }
@@ -150,15 +157,17 @@ __global__ void fused_deform_conv2d_im2col_gpu_kernel(
 
 void fused_conv2d_im2col_cuda(
     at::Tensor data_im,
+    const int hh, const int ww, const int height_tile, const int width_tile, 
     const int batch_size, const int channels, const int height_im, const int width_im,
-    const int height_col, const int width_col, const int kernel_h, const int kernel_w,
+    const int height_col, const int width_col,
+    const int kernel_h, const int kernel_w,
     const int pad_h, const int pad_w, const int stride_h, const int stride_w,
     const int dilation_h, const int dilation_w,
     const int deformable_group, at::Tensor data_col)
 {
   // num_axes should be smaller than block size
   const int channel_per_deformable_group = channels;
-  //const int channel_per_deformable_group = channels / deformable_group;
+  // Note: height_col and width_col are based on TILE
   const int num_kernels = channels * batch_size * height_col * width_col;
 
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
@@ -167,7 +176,7 @@ void fused_conv2d_im2col_cuda(
         scalar_t *data_col_ = data_col.data<scalar_t>();
 
         fused_conv2d_im2col_gpu_kernel<<<GET_BLOCKS(num_kernels), CUDA_NUM_THREADS>>>(
-            num_kernels, data_im_, height_im, width_im, kernel_h, kernel_w,
+	    num_kernels, data_im_, ww, hh, height_tile, width_tile, height_im, width_im, kernel_h, kernel_w,
             pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, channel_per_deformable_group,
             batch_size, channels, deformable_group, height_col, width_col, data_col_);
       }));
@@ -180,6 +189,7 @@ void fused_conv2d_im2col_cuda(
 
 void fused_deform_conv2d_im2col_cuda(
     at::Tensor data_im, at::Tensor data_offset,
+    const int hh, const int ww, const int height_tile, const int width_tile, 
     const int batch_size, const int channels, const int height_im, const int width_im,
     const int height_col, const int width_col, const int kernel_h, const int kenerl_w,
     const int pad_h, const int pad_w, const int stride_h, const int stride_w,
@@ -188,6 +198,7 @@ void fused_deform_conv2d_im2col_cuda(
 {
   // num_axes should be smaller than block size
   const int channel_per_deformable_group = channels / deformable_group;
+  // Note: height_col and width_col are based on TILE
   const int num_kernels = channels * batch_size * height_col * width_col;
 
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
@@ -197,7 +208,7 @@ void fused_deform_conv2d_im2col_cuda(
         scalar_t *data_col_ = data_col.data<scalar_t>();
 
         fused_deform_conv2d_im2col_gpu_kernel<<<GET_BLOCKS(num_kernels), CUDA_NUM_THREADS>>>(
-            num_kernels, data_im_, data_offset_, height_im, width_im, kernel_h, kenerl_w,
+            num_kernels, data_im_, data_offset_, ww, hh, height_tile, width_tile, height_im, width_im, kernel_h, kenerl_w,
             pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, channel_per_deformable_group,
             batch_size, channels, deformable_group, height_col, width_col, data_col_);
       }));
@@ -232,6 +243,9 @@ int fused_deform_conv2d_forward_cuda(
   const int kernel_w_ = weight.size(3);
 
   const int offset_channels_out = offset_weight.size(0);
+
+  const int TILE_H = 8; // 128 cache-line --> using NCHW format. Try both 8x8 and 16x16
+  const int TILE_W = 8;
   
   if (kernel_h_ != kernel_h || kernel_w_ != kernel_w)
     AT_ERROR("Input shape and kernel shape wont match: (%d x %d vs %d x %d).",
@@ -246,6 +260,10 @@ int fused_deform_conv2d_forward_cuda(
       (height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
   const int width_out =
       (width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
+  const int tile_height_out =
+      (TILE_H + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
+  const int tile_width_out =
+      (TILE_W + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
   
   // resize output
   const int step=GET_STEP(batch,in_step);
@@ -255,60 +273,64 @@ int fused_deform_conv2d_forward_cuda(
   offset.zero_();
   // resize temporary columns
   at::Tensor columns =at::zeros({channels * kernel_h * kernel_w,
-	  	  	  step * height_out * width_out},input.options());
+	  	  	  step * tile_height_out * tile_width_out},input.options());
   at::Tensor offset_columns = at::zeros({channels * kernel_h * kernel_w,
-	                  step * height_out * width_out},offset.options());
+	                  step * tile_height_out * tile_width_out},offset.options());
   input=input.view({batch/step,step,channels,height,width});
   
   // divide into group
-  output = output.view({batch/step, group, output.size(1) / group,step,
-                        output.size(2), output.size(3)});
-  offset = offset.view({batch/step, deformable_group, offset.size(1) / deformable_group, step,
-  	                offset.size(2), offset.size(3)});
+  output = output.view({batch/step, group, output.size(2)/TILE_H, output.size(3)/TILE_W, output.size(1) / group, step, TILE_H, TILE_W});
+  offset = offset.view({batch/step, deformable_group, offset.size(2)/TILE_H, offset.size(3)/TILE_W, offset.size(1) / deformable_group, step, TILE_H, TILE_W});
   weight = weight.view({group, weight.size(0) / group, weight.size(1),
                         weight.size(2), weight.size(3)});
   offset_weight = offset_weight.view({deformable_group, offset_weight.size(0) / deformable_group, offset_weight.size(1),
 	                offset_weight.size(2), offset_weight.size(3)});
-  
+
+  for (int hh = 0; hh < TILE_H; hh++) {
+  for (int ww = 0; ww < TILE_W; ww++) {
   for (int b = 0; b < batch/step; b++) {
     // Offset CONV - unroll
     offset_columns.fill_(0);
     fused_conv2d_im2col_cuda(
-        input[b], step, channels, height, width, height_out,
-	width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
+	input[b], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
+	tile_width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
 	dilation_h, dilation_w, deformable_group, offset_columns);
     offset_columns = offset_columns.view({deformable_group, offset_columns.size(0) / deformable_group, offset_columns.size(1)});
 
     // Offset CONV
     for (int g = 0; g < deformable_group; g++) {
-      offset[b][g] = offset[b][g].flatten(1)
-    	                .addmm_(offset_weight[g].flatten(1), offset_columns[g]).view_as(offset[b][g]);
+      offset[b][g][hh][ww] = offset[b][g][hh][ww].flatten(1)
+    	                .addmm_(offset_weight[g].flatten(1), offset_columns[g]).view_as(offset[b][g][hh][ww]);
     }
-    offset = offset.view({batch/step,step,deformable_group * 2 *kernel_h*kernel_w,height_out,width_out});
+    offset = offset.view({batch/step,height_out/TILE_H,width_out/TILE_W,step,deformable_group * 2 *kernel_h*kernel_w, TILE_H, TILE_W});
     offset_columns = offset_columns.view({offset_columns.size(0) * offset_columns.size(1), offset_columns.size(2)});
-    
+
     // BLI
     columns.fill_(0);
     fused_deform_conv2d_im2col_cuda(
-        input[b], offset[b], step, channels, height, width, height_out,
-        width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
+        input[b], offset[b][hh][ww], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
+        tile_width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
         dilation_h, dilation_w, deformable_group, columns);
     columns = columns.view({group, columns.size(0) / group, columns.size(1)});
 
     // Main CONV
     for (int g = 0; g < group; g++) {
-      output[b][g] = output[b][g].flatten(1)
-                        .addmm_(weight[g].flatten(1), columns[g]).view_as(output[b][g]);
+      output[b][g][hh][ww] = output[b][g][hh][ww].flatten(1)
+                        .addmm_(weight[g].flatten(1), columns[g]).view_as(output[b][g][hh][ww]);
       
     }
     columns = columns.view({columns.size(0) * columns.size(1), columns.size(2)});
-    offset = offset.view({batch/step, deformable_group, deformable_group * 2 *kernel_h*kernel_w / deformable_group, step,
-                        height_out, width_out});
+    offset = offset.view({batch/step, deformable_group, height_out/TILE_H, width_out/TILE_W, deformable_group * 2 *kernel_h*kernel_w / deformable_group, step, TILE_H, TILE_W});
   }
+  }
+  }
+  
   weight = weight.view({weight.size(0) * weight.size(1), weight.size(2),
                         weight.size(3), weight.size(4)});
-  output = output.view({output.size(0), output.size(1) * output.size(2),
-                        output.size(3), output.size(4),output.size(5)});
+  //output = output.view({output.size(0), output.size(1) * output.size(2),
+  //                      output.size(3), output.size(4),output.size(5)});
+  output = output.view({output.size(0), output.size(1) * output.size(4),
+	output.size(5), output.size(2) * output.size(6), output.size(3) * output.size(7)});
   output = output.view({batch / step, channels_out, step, height_out, width_out});
   output.transpose_(1, 2);
   output = output.contiguous().view({batch , channels_out, height_out, width_out});
