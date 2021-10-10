@@ -315,7 +315,7 @@ int fused_deform_conv2d_forward_cuda(
   // resize temporary columns
   at::Tensor columns =at::zeros({height_out/tile_height_out, width_out/tile_width_out, channels * kernel_h * kernel_w,
 	  	  	  step * tile_height_out * tile_width_out},input.options());
-  at::Tensor offset_columns = at::zeros({channels * kernel_h * kernel_w,
+  at::Tensor offset_columns = at::zeros({height_out/tile_height_out, width_out/tile_width_out, channels * kernel_h * kernel_w,
 	                  step * tile_height_out * tile_width_out},offset.options());
   input=input.view({batch/step,step,channels,height,width});
   
@@ -330,6 +330,7 @@ int fused_deform_conv2d_forward_cuda(
   for (int b = 0; b < batch/step; b++) {
     for (int hh = 0; hh < height_out/tile_height_out; hh++) {
     for (int ww = 0; ww < width_out/tile_width_out; ww++) {
+      
       
       // Offset CONV - unroll
       offset_columns.fill_(0);
