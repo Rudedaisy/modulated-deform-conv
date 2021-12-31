@@ -328,11 +328,11 @@ int fused_deform_conv2d_forward_cuda(
 	                offset_weight.size(2), offset_weight.size(3)});
 
   for (int b = 0; b < batch/step; b++) {
-    for (int hh = 0; hh < height_out/tile_height_out; hh++) {
+    for (int hh = 0; hh < height_out/tile_height_out; hh++) {  /// ED: call __global__ function from here to generate all the high-level tiles
     for (int ww = 0; ww < width_out/tile_width_out; ww++) {
       
       
-      // Offset CONV - unroll
+      // Offset CONV - unroll /// ED: simply replace __global__ func with __device__
       offset_columns.fill_(0);
       fused_conv2d_im2col_cuda(
 	   input[b], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
@@ -340,7 +340,7 @@ int fused_deform_conv2d_forward_cuda(
 	   dilation_h, dilation_w, deformable_group, offset_columns);
       offset_columns = offset_columns.view({deformable_group, offset_columns.size(0) / deformable_group, offset_columns.size(1)});
 
-      // Offset CONV
+      // Offset CONV /// ED: switch with device-side mma
       for (int g = 0; g < deformable_group; g++) {
 	offset[b][g][hh][ww] = offset[b][g][hh][ww].flatten(1)
     	                .addmm_(offset_weight[g].flatten(1), offset_columns[g]).view_as(offset[b][g][hh][ww]);
@@ -348,7 +348,7 @@ int fused_deform_conv2d_forward_cuda(
       offset = offset.view({batch/step,height_out/tile_height_out,width_out/tile_width_out,step,deformable_group * 2 *kernel_h*kernel_w, tile_height_out, tile_width_out});
       offset_columns = offset_columns.view({offset_columns.size(0) * offset_columns.size(1), offset_columns.size(2)});
 
-      // BLI
+      // BLI /// ED: simply replace __global__ func with __device__
       columns[hh][ww].fill_(0);
       fused_deform_conv2d_im2col_cuda(
 	    input[b], offset[b][hh][ww], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
