@@ -2,24 +2,10 @@
 // ^ The above line lets emacs visualize this as a c++ file
 
 #include "config.h"
-
-template <typename scalar_t>
-__device__ scalar_t fused_conv2d_im2col(
-                const scalar_t *bottom_data, const int data_width,
-        const int height, const int width, scalar_t h, scalar_t w)
-{
-  int h_low = floor(h);
-  int w_low = floor(w);
-  scalar_t val;
-  
-  if (h_low >= 0 && w_low >= 0 && h_low < height && w_low < width) {
-    val = bottom_data[h_low * data_width + w_low];
-  } else {
-    val = 0;
-  }
-
-  return val;
-}
+#include <mma.h>
+#include <stdio.h>
+#include <curand.h>
+using namespace nvcuda;
 
 template <typename scalar_t>
 __device__ scalar_t fused_deform_conv2d_im2col_bilinear(
@@ -55,7 +41,7 @@ __device__ scalar_t fused_deform_conv2d_im2col_bilinear(
 }
 
 template <typename scalar_t>
-__global__ void fused_conv2d_im2col_gpu_kernel(
+__device__ void fused_conv2d_im2col(
         const int n, const scalar_t *data_im,
         const int ww, const int hh, const int height_tile, const int width_tile, const int height, const int width,
 	const int kernel_h, const int kernel_w,
@@ -67,7 +53,7 @@ __global__ void fused_conv2d_im2col_gpu_kernel(
         const int height_col, const int width_col,
         scalar_t *data_col)
 {
-CUDA_KERNEL_LOOP(index, n)
+  for(int index = 0; index < n; index)
   {
     // index index of output matrix
     const int w_col = index % width_col;
@@ -91,7 +77,6 @@ CUDA_KERNEL_LOOP(index, n)
         const scalar_t h_im = h_in + i * dilation_h;
 	const scalar_t w_im = w_in + j * dilation_w;
         if (h_im > -1 && w_im > -1 && h_im < height && w_im < width){
-          //val = fused_conv2d_im2col(data_im_ptr, width, height, width, h_im, w_im); // may want to in-line this function
 	  val = data_im_ptr[(int)h_im * (int)width + (int)w_im];
 	} else {
 	  val = 0;
@@ -103,7 +88,7 @@ CUDA_KERNEL_LOOP(index, n)
 }
 
 template <typename scalar_t>
-__global__ void fused_deform_conv2d_im2col_gpu_kernel(
+__device__ void fused_deform_conv2d_im2col(
         const int n, const scalar_t *data_im, const scalar_t *data_offset,
 	const int ww, const int hh, const int height_tile, const int width_tile, 
         const int height, const int width, const int kernel_h, const int kernel_w,
@@ -115,7 +100,7 @@ __global__ void fused_deform_conv2d_im2col_gpu_kernel(
         const int height_col, const int width_col,
         scalar_t *data_col)
 {
-  CUDA_KERNEL_LOOP(index, n)
+  for(int index = 0; index < n; index++)
   {
     // index index of output matrix
     const int w_col = index % width_col;
@@ -155,107 +140,79 @@ __global__ void fused_deform_conv2d_im2col_gpu_kernel(
   }
 }
 
-void fused_conv2d_im2col_cuda(
-    at::Tensor data_im,
-    const int hh, const int ww, const int height_tile, const int width_tile, 
-    const int batch_size, const int channels, const int height_im, const int width_im,
-    const int height_col, const int width_col,
-    const int kernel_h, const int kernel_w,
-    const int pad_h, const int pad_w, const int stride_h, const int stride_w,
-    const int dilation_h, const int dilation_w,
-    const int deformable_group, at::Tensor data_col)
-{
-  // num_axes should be smaller than block size
-  const int channel_per_deformable_group = channels;
-  // Note: height_col and width_col are based on TILE
-  const int num_kernels = channels * batch_size * height_col * width_col;
-
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-      data_im.scalar_type(), "fused_conv2d_im2col_gpu_kernel", ([&] {
-        const scalar_t *data_im_ = data_im.data<scalar_t>();
-        scalar_t *data_col_ = data_col.data<scalar_t>();
-
-        fused_conv2d_im2col_gpu_kernel<<<GET_BLOCKS(num_kernels), CUDA_NUM_THREADS>>>(
-	    num_kernels, data_im_, ww, hh, height_tile, width_tile, height_im, width_im, kernel_h, kernel_w,
-            pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, channel_per_deformable_group,
-            batch_size, channels, deformable_group, height_col, width_col, data_col_);
-      }));
-  cudaError_t err = cudaGetLastError();
-  if (err != cudaSuccess)
-  {
-    printf("error in fused_deform_conv2d_im2col_cuda: %s\n", cudaGetErrorString(err));
-  }
-}
-
-void fused_deform_conv2d_im2col_cuda(
-    at::Tensor data_im, at::Tensor data_offset,
-    const int hh, const int ww, const int height_tile, const int width_tile, 
-    const int batch_size, const int channels, const int height_im, const int width_im,
-    const int height_col, const int width_col, const int kernel_h, const int kenerl_w,
-    const int pad_h, const int pad_w, const int stride_h, const int stride_w,
-    const int dilation_h, const int dilation_w,
-    const int deformable_group, at::Tensor data_col)
-{
-  // num_axes should be smaller than block size
-  const int channel_per_deformable_group = channels / deformable_group;
-  // Note: height_col and width_col are based on TILE
-  const int num_kernels = channels * batch_size * height_col * width_col;
-
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-      data_im.scalar_type(), "fused_deform_conv2d_im2col_gpu_kernel", ([&] {
-        const scalar_t *data_im_ = data_im.data<scalar_t>();
-        const scalar_t *data_offset_ = data_offset.data<scalar_t>();
-        scalar_t *data_col_ = data_col.data<scalar_t>();
-
-        fused_deform_conv2d_im2col_gpu_kernel<<<GET_BLOCKS(num_kernels), CUDA_NUM_THREADS>>>(
-            num_kernels, data_im_, data_offset_, ww, hh, height_tile, width_tile, height_im, width_im, kernel_h, kenerl_w,
-            pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, channel_per_deformable_group,
-            batch_size, channels, deformable_group, height_col, width_col, data_col_);
-      }));
-  cudaError_t err = cudaGetLastError();
-  if (err != cudaSuccess)
-  {
-    printf("error in fused_deform_conv2d_im2col_cuda: %s\n", cudaGetErrorString(err));
-  }
-}
-/*
-__global__ void stages1_2(
-    const int b, const int g, const int hh, const int ww,
-    at::Tensor input, at::Tensor offset_weight, at::Tensor offset,
+template <typename scalar_t>
+__global__ void stages1_2_gpu_kernel(
+    const int b, const int num_tiles,
+    const scalar_t *input, const scalar_t *offset_weight, scalar_t *offset, scalar_t *columns, scalar_t *offset_columns,
     const int TILE_H, const int TILE_W, const int step,
     const int batch, const int channels, const int height, const int width,
     const int height_out, const int width_out, const int tile_height_out, const int tile_width_out,
-    const int kernel_h, const int kernel_w, const int pad_h, const int pad_w, const int stride_h, const int stride_w,
+    const int kernel_h, const int kernel_w, const int offset_channels_out, const int pad_h, const int pad_w, const int stride_h, const int stride_w,
     const int dilation_h, const int dilation_w, const int deformable_group)
 {
-  at::Tensor offset_columns = at::zeros({channels * kernel_h * kernel_w,
-                          step * tile_height_out * tile_width_out},offset.options());
+  // The only dimensions currently supported by WMMA for double-double-double (https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#wmma-type-sizes Section B.24.6 Element types & matrix sizes)
+  const int WMMA_M = 16;
+  const int WMMA_N = 16;
+  const int WMMA_K = 16;
+  const int M = batch * tile_height_out * tile_width_out;
+  const int N = offset_channels_out;
+  const int K = channels * kernel_h * kernel_w;
+  assert(M % WMMA_M == 0);
+  assert(N % WMMA_N == 0);
+  assert(K % WMMA_K == 0);
   
-  // Offset CONV - unroll
-  offset_columns.fill_(0);
-  fused_conv2d_im2col_cuda(
-			   input[b], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
-			   tile_width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
-			   dilation_h, dilation_w, deformable_group, offset_columns);
-  offset_columns = offset_columns.view({deformable_group, offset_columns.size(0) / deformable_group, offset_columns.size(1)});
+  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> a_frag; /// ED: NOTE - may need multiple frags to pipeline data loading and compute
+  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag;
+  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
   
-  // Offset CONV
-  for (int g = 0; g < deformable_group; g++) {
-    offset[b][g][hh][ww] = offset[b][g][hh][ww].flatten(1)
-      .addmm_(offset_weight[g].flatten(1), offset_columns[g]).view_as(offset[b][g][hh][ww]);
+  const int num_kernels = channels * batch * height_out * width_out;
+  
+  CUDA_KERNEL_LOOP(index, num_tiles) {
+    const int tile_cols = width_out/tile_width_out;
+    const int ww = index % tile_cols;
+    const int hh = index / tile_cols;
+    // batch, deform_group, tile_h index, tile_w index
+    scalar_t *offset_tile = offset + (((((hh * (width_out/tile_width_out) + ww) * (channels/deformable_group)) * batch) * tile_height_out) * tile_width_out);
+    scalar_t *offset_columns_tile = offset_columns + (((((((hh * (width_out/tile_width_out) + ww) * channels) * kernel_h) * kernel_w) * batch) * tile_height_out) * tile_width_out);
+    scalar_t *columns_tile = columns + (((((((hh * (width_out/tile_width_out) + ww) * channels) * kernel_h) * kernel_w) * batch) * tile_height_out) * tile_width_out);
+    
+    // HINT: look at "input" tensor. both fused_conv2d_im2col_cuda and fused_deform_conv2d_im2col_cuda need to use it
+    // Offset CONV - unroll
+    fused_conv2d_im2col(
+            num_kernels, input, ww, hh, TILE_H, TILE_W, height, width, kernel_h, kernel_w,
+            pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, channels,
+            step, channels, deformable_group, height_out, width_out, offset_columns_tile);
+
+    // Loop through all 16x16x16 sub-tiles to compute wmma
+    for(int m = 0; m < M; m += WMMA_M) {
+      for(int n = 0; n < N; n += WMMA_N) {
+	wmma::fill_fragment(acc_frag, (scalar_t)0);
+	for(int k = 0; k < K; k += WMMA_K) {
+	  int aRow = m * WMMA_M;
+	  int aCol = k;
+	  int bRow = k;
+	  int bCol = n * WMMA_N;
+	  // Load the inputs
+	  wmma::load_matrix_sync(a_frag, (half *)(offset_columns + aRow + aCol * M), M);
+	  wmma::load_matrix_sync(b_frag, (half *)(offset_weight + bRow + bCol * K), K);
+	  // Perform the matrix multiplication
+	  wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+	}
+	// Store the output
+	int cRow = m * WMMA_M;
+	int cCol = n * WMMA_N;
+	wmma::store_matrix_sync((float *)(offset_tile + cRow + cCol * M), acc_frag, M, wmma::mem_col_major);
+      }
+    }
+    
+    //offset = offset.view({batch/step,height_out/tile_height_out,width_out/tile_width_out,step,deformable_group * 2 *kernel_h*kernel_w, tile_height_out, tile_width_out});
+    // BLI
+    fused_deform_conv2d_im2col(channels * batch * tile_height_out * tile_width_out, input, offset_tile, ww, hh, TILE_H, TILE_W, height, width, kernel_h, kernel_w,
+			       pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, channels,
+			       step, channels, deformable_group, tile_height_out, tile_width_out, columns_tile);    
   }
-  offset = offset.view({batch/step,height_out/tile_height_out,width_out/tile_width_out,step,deformable_group * 2 *kernel_h*kernel_w, tile_height_out, tile_width_out});
-  offset_columns = offset_columns.view({offset_columns.size(0) * offset_columns.size(1), offset_columns.size(2)});
-  
-  // BLI
-  columns[hh][ww].fill_(0);
-  fused_deform_conv2d_im2col_cuda(
-				  input[b], offset[b][hh][ww], hh, ww, TILE_H, TILE_W, step, channels, height, width, tile_height_out,
-				  tile_width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
-				  dilation_h, dilation_w, deformable_group, columns[hh][ww]);
-  offset = offset.view({batch/step,deformable_group,height_out/tile_height_out,width_out/tile_width_out,deformable_group*2*kernel_h*kernel_w/deformable_group,step,tile_height_out,tile_width_out});
 }
-*/
+
 int fused_deform_conv2d_forward_cuda(
     at::Tensor input, at::Tensor weight, at::Tensor bias, at::Tensor offset_weight,
     at::Tensor offset, at::Tensor output,
@@ -301,10 +258,10 @@ int fused_deform_conv2d_forward_cuda(
       (TILE_H + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
   const int tile_width_out =
       (TILE_W + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
-
+  
   // Prepare streams/multi-threading for concurrent kernel execution
   // Current plan: use dynamic parallelism i.e., launch kernels within a parent kernel
-  const int num_threads = (height_out/tile_height_out) * (width_out/tile_width_out);
+  const int num_tiles = (height_out/tile_height_out) * (width_out/tile_width_out);
   
   // resize output
   const int step=GET_STEP(batch,in_step);
@@ -314,9 +271,10 @@ int fused_deform_conv2d_forward_cuda(
   offset.zero_();
   // resize temporary columns
   at::Tensor columns =at::zeros({height_out/tile_height_out, width_out/tile_width_out, channels * kernel_h * kernel_w,
-	  	  	  step * tile_height_out * tile_width_out},input.options());
+	step * tile_height_out * tile_width_out},input.options());
+  /////////////columns = columns.to(float);
   at::Tensor offset_columns = at::zeros({height_out/tile_height_out, width_out/tile_width_out, channels * kernel_h * kernel_w,
-	                  step * tile_height_out * tile_width_out},offset.options());
+	step * tile_height_out * tile_width_out},input.options());
   input=input.view({batch/step,step,channels,height,width});
   
   // divide into group
@@ -328,6 +286,7 @@ int fused_deform_conv2d_forward_cuda(
 	                offset_weight.size(2), offset_weight.size(3)});
 
   for (int b = 0; b < batch/step; b++) {
+    /*
     for (int hh = 0; hh < height_out/tile_height_out; hh++) {  /// ED: call __global__ function from here to generate all the high-level tiles
     for (int ww = 0; ww < width_out/tile_width_out; ww++) {
       
@@ -358,8 +317,29 @@ int fused_deform_conv2d_forward_cuda(
       
     }
     }
-    columns = columns.view({group, channels * kernel_h * kernel_w / group, step * height_out * width_out});
+    */
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+	  input.scalar_type(), "stages1_2_gpu_kernel", ([&] {
+	  const scalar_t *input_ = input[b].data<scalar_t>();
+	  const	scalar_t *offset_weight_ = offset_weight.data<scalar_t>();
+	  scalar_t *offset_ = offset[b].data<scalar_t>();
+	  scalar_t *columns_ = columns.data<scalar_t>();
+	  scalar_t *offset_columns_ = offset_columns.data<scalar_t>();
 
+	  stages1_2_gpu_kernel<<<8, 8>>>(b, num_tiles,
+			       input_, offset_weight_, offset_, columns_, offset_columns_,
+			       TILE_H, TILE_W, step,
+			       batch, channels, height, width,
+			       height_out, width_out, tile_height_out, tile_width_out,
+			       kernel_h, kernel_w, offset_channels_out, pad_h, pad_w, stride_h, stride_w,
+			       dilation_h, dilation_w, deformable_group);
+	  }));
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+	printf("error in stages1_2_gpu_kernel: %s\n", cudaGetErrorString(err));
+    }
+
+    columns = columns.view({group, channels * kernel_h * kernel_w / group, step * height_out * width_out});
     // Main CONV
     for (int g = 0; g < group; g++) {
       output[b][g] = output[b][g].flatten(1)
