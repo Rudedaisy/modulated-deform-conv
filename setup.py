@@ -11,9 +11,9 @@ def make_cuda_ext(name, sources,includes):
         extra_compile_args={
             'cxx':  [],
             'nvcc': [
-                '-D__CUDA_NO_HALF_OPERATORS__',
-                '-D__CUDA_NO_HALF_CONVERSIONS__',
-                '-D__CUDA_NO_HALF2_OPERATORS__',
+                #'-D__CUDA_NO_HALF_OPERATORS__',
+                #'-D__CUDA_NO_HALF_CONVERSIONS__',
+                #'-D__CUDA_NO_HALF2_OPERATORS__',
                 '-arch=sm_86',
                 '-lcurand',
             ]})

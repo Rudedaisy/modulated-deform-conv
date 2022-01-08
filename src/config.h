@@ -19,7 +19,16 @@ namespace py = pybind11;
 #define CUDA_KERNEL_LOOP(i, n)                                 \
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (n); \
        i += blockDim.x * gridDim.x)
-      
+
+#define CUDA_GRID_LOOP(i, n)                                   \
+  for (int i = blockIdx.x; i < (n); i += gridDim.x)
+
+#define CUDA_BLOCK_LOOP(i, n)                                  \
+  for (int i = threadIdx.x; i < (n); i += blockDim.x)
+
+#define CUDA_LIMITED_BLOCK_LOOP(i, n, limit)                   \
+  for (int i = threadIdx.x; i < (n); i += limit)
+
 #define TRY_ALLOCATE(left , right)  \
     try  {                     \
         left = right ;              \
